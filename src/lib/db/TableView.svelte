@@ -25,6 +25,7 @@
   import { parse as parseCsv, stringify } from './csv';
   import { calcLabel, pinFirst, type Group } from './query';
   import { CALC_LABELS, CALC_SHORT, EDITABLE, TYPES, calcsFor, typeInfo } from './schema';
+  import { GUTTER, freezeEligibility, planFreeze } from './freeze';
   import type { CalcFn, DbRow, DbView, Property, PropertyType } from '../types';
 
   let {
@@ -51,6 +52,71 @@
   const widthOf = (p: Property) => c.widths?.[p.id] ?? WIDTH[p.type] ?? 180;
   let resizing = $state<{ id: string; w: number } | null>(null);
   const width = (p: Property) => (resizing?.id === p.id ? resizing.w : widthOf(p));
+
+  // ------------------------------------------------------- frozen columns
+  // The view stores the property its pins end at. The frozen prefix is every
+  // visible column through it, with its full rendered width: a resize never
+  // silently drops or narrows part of it. The menu asks freezeEligibility with
+  // the same geometry, so it cannot offer a boundary the strip cannot show.
+  let viewportW = $state(0);
+
+  const pinned = $derived.by(() =>
+    planFreeze({
+      propIds: databases.props(dbId).map((p) => p.id),
+      columns: columns.map((p) => ({ id: p.id, width: width(p) })),
+      freezeThrough: c.freezeThrough,
+      viewport: viewportW,
+    }),
+  );
+  const pinnedLeft = $derived.by(() => {
+    const left = new Map<string, number>();
+    let x = GUTTER;
+    for (const id of pinned.pinned) {
+      left.set(id, x);
+      const p = columns.find((col) => col.id === id);
+      if (p) x += width(p);
+    }
+    return left;
+  });
+  const pinnedSet = $derived(new Set(pinned.pinned));
+  const lastPinned = $derived(pinned.pinned.at(-1) ?? null);
+
+  function measure() {
+    if (body) viewportW = body.clientWidth;
+  }
+
+  /** The same geometry the strip uses, asked for one candidate boundary. */
+  function freezeCheckFor(propId: string) {
+    return freezeEligibility({
+      propIds: databases.props(dbId).map((p) => p.id),
+      columns: columns.map((p) => ({ id: p.id, width: width(p) })),
+      freezeThrough: propId,
+      viewport: viewportW,
+    });
+  }
+  /** Called on click, after a fresh measure, so a stale menu cannot persist. */
+  function recheckFreeze(propId: string) {
+    measure();
+    return freezeCheckFor(propId).eligible;
+  }
+
+  $effect(() => {
+    if (!body) return;
+    const ro = new ResizeObserver(() => measure());
+    ro.observe(body);
+    measure();
+    return () => ro.disconnect();
+  });
+
+  $effect(() => {
+    // Column edits and a resize change whether the prefix still fits.
+    void template;
+    void columns.length;
+    void view.id;
+    void resizing;
+    void tick().then(measure);
+  });
+
   const template = $derived(`40px ${columns.map((p) => `${width(p)}px`).join(' ')} 44px`);
   const total = $derived(40 + columns.reduce((n, p) => n + width(p), 0) + 44);
   const manual = $derived(!(c.sorts ?? []).length);
@@ -136,6 +202,39 @@
     return grid?.querySelector(`[data-r="${p.r}"][data-c="${p.c}"]`) ?? null;
   }
 
+  /**
+   * Brings a cell into view without hiding it under the frozen columns or the
+   * header. `scrollIntoView` knows about neither, and it scrolls every
+   * ancestor, so the page and the table can both jump.
+   */
+  function reveal(el: HTMLElement, col: number) {
+    if (!body) return;
+    const b = body.getBoundingClientRect();
+    const r = el.getBoundingClientRect();
+    const prop = columns[col];
+    // A frozen cell is always visible sideways, and scrolling would move the
+    // data columns instead.
+    if (!prop || !pinnedSet.has(prop.id)) {
+      const left = b.left + pinned.width;
+      if (r.left < left) body.scrollLeft -= left - r.left;
+      else if (r.right > b.right) body.scrollLeft += r.right - b.right;
+    }
+
+    // The table scrolls itself in a full-page view; otherwise the page does.
+    let root: HTMLElement | null = body;
+    while (root && !(/(auto|scroll)/.test(getComputedStyle(root).overflowY) && root.scrollHeight > root.clientHeight + 1)) root = root.parentElement;
+    if (root) {
+      const rb = root.getBoundingClientRect();
+      const top = rb.top + (headWrap?.getBoundingClientRect().height ?? 0);
+      if (r.top < top) root.scrollTop -= top - r.top;
+      else if (r.bottom > rb.bottom) root.scrollTop += r.bottom - rb.bottom;
+    } else {
+      const top = headWrap?.getBoundingClientRect().bottom ?? 0;
+      if (r.top < top) window.scrollBy(0, r.top - top);
+      else if (r.bottom > window.innerHeight) window.scrollBy(0, r.bottom - window.innerHeight);
+    }
+  }
+
   async function select(p: Pos, extend = false) {
     // A jump (Ctrl+↓) goes at most 500 rows past what's drawn: drawing a
     // 50,000-row table to its end would freeze the window.
@@ -147,7 +246,8 @@
     else if (!anchor) anchor = sel;
     sel = { r, c: col };
     await tick();
-    cellEl(sel)?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    const el = cellEl(sel);
+    if (el) reveal(el, col);
   }
 
   function move(m: Move) {
@@ -438,6 +538,7 @@
   // ------------------------------------------------------------- columns
 
   let menuFor = $state<{ prop: Property; anchor: Element; fresh?: boolean } | null>(null);
+  const menuFreeze = $derived(menuFor ? freezeCheckFor(menuFor.prop.id) : null);
   let addAnchor = $state<Element | null>(null);
 
   async function addColumn(type: PropertyType) {
@@ -588,7 +689,7 @@
     ondragover={(e) => onRowOver(e, row)}
     ondrop={onRowDrop}
   >
-    <div class="gutter">
+    <div class="gutter" class:pinned={pinned.pinned.length > 0} style:left="0px">
       {#if manual}
         <span
           class="handle"
@@ -612,11 +713,14 @@
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         class="td"
+        class:pinned={pinnedSet.has(p.id)}
+        class:frozen-end={lastPinned === p.id}
         class:sel={sel?.r === r && sel?.c === col}
         class:in-range={inRange(r, col) && !!anchor}
         class:right={p.type === 'number' || (p.type === 'formula' && databases.kind(dbId, p) === 'number') || (p.type === 'rollup' && databases.kind(dbId, p) === 'number')}
         class:center={p.type === 'checkbox'}
         class:computed={!EDITABLE.has(p.type)}
+        style:left={pinnedSet.has(p.id) ? `${pinnedLeft.get(p.id) ?? 0}px` : null}
         data-r={r}
         data-c={col}
         role="gridcell"
@@ -665,7 +769,7 @@
   </div>
 {/snippet}
 
-<div class="table" class:wrap={c.wrap} style:--table-w="{total}px">
+<div class="table" class:wrap={c.wrap} class:frozen={pinned.pinned.length > 0} style:--table-w="{total}px">
   {#if picked.size}
     <div class="bulk">
       <span class="count">{picked.size} selected</span>
@@ -679,16 +783,19 @@
   <div class="head-wrap" bind:this={headWrap} onscroll={() => body && body.scrollLeft !== headWrap.scrollLeft && (body.scrollLeft = headWrap.scrollLeft)}>
     <div class="head-inner">
     <div class="head" bind:this={head} role="row" style:grid-template-columns={template}>
-      <div class="gutter">
+      <div class="gutter" class:pinned={pinned.pinned.length > 0} style:left="0px">
         <button class="pick round" class:on={picked.size > 0 && picked.size === flat.length} class:some={picked.size > 0 && picked.size < flat.length} onclick={pickAll} aria-label="Select all rows" tabindex="-1"></button>
       </div>
       {#each columns as p (p.id)}
         <!-- svelte-ignore a11y_click_events_have_key_events -->
         <div
           class="th"
+          class:pinned={pinnedSet.has(p.id)}
+          class:frozen-end={lastPinned === p.id}
           class:drop-before={dropCol?.id === p.id && dropCol.side === 'before'}
           class:drop-after={dropCol?.id === p.id && dropCol.side === 'after'}
           class:right={p.type === 'number'}
+          style:left={pinnedSet.has(p.id) ? `${pinnedLeft.get(p.id) ?? 0}px` : null}
           data-prop={p.id}
           role="columnheader"
           tabindex="-1"
@@ -711,6 +818,9 @@
           {#if (c.sorts ?? []).some((s) => s.prop === p.id)}
             <Icon name={(c.sorts ?? []).find((s) => s.prop === p.id)?.dir === 'desc' ? 'arrow-down' : 'arrow-up'} size={12} />
           {/if}
+          {#if lastPinned === p.id}
+            <span class="pin-mark" data-tip={pinned.overflow ? 'Frozen columns (wider than this window)' : 'Frozen columns'} aria-label="Frozen columns"><Icon name="pin" size={11} /></span>
+          {/if}
           <!-- svelte-ignore a11y_no_static_element_interactions -->
           <span class="resize" onpointerdown={(e) => startResize(e, p)} ondblclick={(e) => (e.stopPropagation(), resetWidth(p))} onclick={(e) => e.stopPropagation()}></span>
         </div>
@@ -719,6 +829,16 @@
     </div>
     </div>
   </div>
+
+  {#if pinned.overflow}
+    <!-- A saved freeze survives a resize intact; this is the reachable way out
+         when its strip is too wide to show the boundary column. -->
+    <div class="freeze-overflow" role="status">
+      <Icon name="pin" size={13} />
+      <span class="grow">Frozen columns no longer fit in this window.</span>
+      <button class="btn small" onclick={() => databases.updateView(dbId, view.id, { freezeThrough: null })}>Unfreeze</button>
+    </div>
+  {/if}
 
   <div class="body" bind:this={body} onscroll={() => headWrap.scrollLeft !== body.scrollLeft && (headWrap.scrollLeft = body.scrollLeft)}>
     <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
@@ -737,7 +857,7 @@
         {@const shownIds = new Set(visible.map((r) => r.id))}
         {#each shownGroups as g (g.key)}
           {#if !g.rows.length || g.rows.some((r) => shownIds.has(r.id)) || collapsed.has(g.key)}
-            <div class="group-row">
+            <div class="group-row" style:left={pinned.pinned.length ? `${pinned.width}px` : null}>
               <button class="chev" class:closed={collapsed.has(g.key)} onclick={() => toggleGroup(g.key)} aria-label={collapsed.has(g.key) ? 'Show group' : 'Hide group'}><Icon name="chevron-down" size={13} stroke={2.2} /></button>
               {#if g.key && g.color}<span class="pill" class:status={databases.prop(dbId, c.group)?.type === 'status'} style:--pill={g.color}><span>{g.label}</span></span>{:else}<span class="g-label">{g.label}</span>{/if}
               <span class="g-count">{g.total ?? g.rows.length}</span>
@@ -766,10 +886,19 @@
       <button class="add-row" onclick={() => newRow(undefined, undefined, true)}><Icon name="plus" size={14} /> New</button>
 
       <div class="calc" style:grid-template-columns={template}>
-        <div></div>
+        <div class="calc-gutter" class:pinned={pinned.pinned.length > 0} style:left="0px"></div>
         {#each columns as p (p.id)}
           {@const fn = c.calc?.[p.id] ?? 'none'}
-          <button class="calc-cell" class:set={fn !== 'none'} class:right={p.type === 'number'} disabled={p.type === 'button'} onclick={(e) => calcMenu(e, p)}>
+          <button
+            class="calc-cell"
+            class:pinned={pinnedSet.has(p.id)}
+            class:frozen-end={lastPinned === p.id}
+            class:set={fn !== 'none'}
+            class:right={p.type === 'number'}
+            style:left={pinnedSet.has(p.id) ? `${pinnedLeft.get(p.id) ?? 0}px` : null}
+            disabled={p.type === 'button'}
+            onclick={(e) => calcMenu(e, p)}
+          >
             {#if p.type === 'button'}
               <span></span>
             {:else if fn !== 'none'}
@@ -797,7 +926,7 @@
 
 {#if menuFor}
   {#key menuFor.prop.id}
-    <PropertyMenu {dbId} prop={menuFor.prop} {view} anchor={menuFor.anchor} fresh={menuFor.fresh} {onfilter} onclose={() => (menuFor = null)} />
+    <PropertyMenu {dbId} prop={menuFor.prop} {view} anchor={menuFor.anchor} fresh={menuFor.fresh} {onfilter} freezeStatus={menuFreeze} {recheckFreeze} onclose={() => (menuFor = null)} />
   {/key}
 {/if}
 
@@ -826,6 +955,26 @@
   }
   :global(.embedded) .table {
     margin-left: -48px;
+  }
+  .freeze-overflow {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: none;
+    min-height: 32px;
+    padding: 3px 8px 3px 12px;
+    font-size: var(--fs-ui);
+    color: var(--text-2);
+    background: color-mix(in srgb, var(--accent) 6%, var(--bg));
+    box-shadow: inset 0 -1px 0 var(--separator);
+  }
+  .freeze-overflow > :global(.icon) {
+    flex: none;
+    color: var(--text-3);
+  }
+  .freeze-overflow .grow {
+    flex: 1;
+    min-width: 0;
   }
   .head-inner,
   .grid {
@@ -925,6 +1074,14 @@
        long scrolls as lightly as a short one. */
     content-visibility: auto;
     contain-intrinsic-block-size: auto 35px;
+  }
+  /* While columns are frozen the rows keep their sticky children in the
+     ordinary paint tree: containment can rasterize a row band against a stale
+     horizontal offset during a drag. Progressive row loading stays on, and
+     the optimization returns as soon as the view is unfrozen. */
+  .table.frozen .tr {
+    content-visibility: visible;
+    contain-intrinsic-block-size: none;
   }
   .tr:hover .gutter .handle,
   .tr:hover .pick,
@@ -1031,6 +1188,73 @@
     box-shadow:
       inset 0 0 0 2px color-mix(in srgb, var(--accent) 35%, transparent),
       inset -1px 0 0 var(--separator);
+  }
+  /* Frozen columns: an opaque leading strip, above the cells scrolling under
+     it. A firmer edge marks where the freeze ends. */
+  .th.pinned,
+  .td.pinned,
+  .calc-cell.pinned,
+  .gutter.pinned {
+    position: sticky;
+    background: var(--bg);
+  }
+  .th.pinned {
+    z-index: 2;
+  }
+  .th.pinned:hover {
+    background: color-mix(in srgb, var(--text) 6%, var(--bg));
+  }
+  .td.pinned,
+  .calc-cell.pinned {
+    z-index: 2;
+  }
+  .gutter.pinned {
+    z-index: 3;
+  }
+  .td.pinned {
+    box-shadow:
+      inset -1px 0 0 var(--separator),
+      inset 0 -1px 0 var(--separator);
+  }
+  .td.pinned.frozen-end,
+  .th.pinned.frozen-end,
+  .calc-cell.pinned.frozen-end {
+    box-shadow: inset -2px 0 0 var(--separator-strong);
+  }
+  .td.pinned.frozen-end {
+    box-shadow:
+      inset -2px 0 0 var(--separator-strong),
+      inset 0 -1px 0 var(--separator);
+  }
+  .tr.picked .td.pinned {
+    background: color-mix(in srgb, var(--accent) 6%, var(--bg));
+  }
+  .tr.picked .gutter.pinned {
+    background: color-mix(in srgb, var(--accent) 6%, var(--bg));
+  }
+  .td.pinned.in-range {
+    background: color-mix(in srgb, var(--accent) 9%, var(--bg));
+  }
+  .td.pinned.sel {
+    background: var(--bg);
+    box-shadow:
+      inset 0 0 0 2px var(--accent),
+      inset 0 -1px 0 var(--separator);
+  }
+  .grid:not(:focus-within) .td.pinned.sel {
+    box-shadow:
+      inset 0 0 0 2px color-mix(in srgb, var(--accent) 35%, transparent),
+      inset 0 -1px 0 var(--separator);
+  }
+  .pin-mark {
+    display: grid;
+    place-items: center;
+    flex: none;
+    margin-left: auto;
+    color: var(--text-3);
+  }
+  .calc-gutter {
+    display: block;
   }
   .row-tools {
     position: absolute;

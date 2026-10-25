@@ -454,6 +454,8 @@ export interface ViewConfig {
   widths?: Record<string, number>;
   /** Wrap long text in table cells. */
   wrap?: boolean;
+  /** Table: keep the leading columns in place through this property (null: none). */
+  freezeThrough?: string | null;
   /** The summary under each table column. */
   calc?: Record<string, CalcFn>;
   /** Gallery and board cards. */

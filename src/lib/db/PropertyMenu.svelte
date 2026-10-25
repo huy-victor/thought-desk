@@ -17,6 +17,7 @@
   import { store } from '../store.svelte';
   import { ui } from '../ui.svelte';
   import { HAS_OPTIONS, NUMBER_FORMATS, ROLLUP_FNS, STATUS_GROUPS, TYPES, newOption, options, typeInfo } from './schema';
+  import { NO_ROOM } from './freeze';
   import type { DbView, NumberFormat, Property, PropertyType, RollupFn, SelectOption } from '../types';
 
   let {
@@ -27,6 +28,8 @@
     onclose,
     onfilter,
     fresh = false,
+    freezeStatus = null,
+    recheckFreeze,
   }: {
     dbId: string;
     prop: Property;
@@ -37,6 +40,10 @@
     onfilter?: (p: Property) => void;
     /** Just added: the name is selected, ready to type over. */
     fresh?: boolean;
+    /** Geometry for freezing through this property, from the table itself. */
+    freezeStatus?: { eligible: boolean; reason: string } | null;
+    /** Re-measures on click; false means a resize raced the menu. */
+    recheckFreeze?: (propId: string) => boolean;
   } = $props();
 
   // The menu is for one property; inputs blurring as it closes still see it.
@@ -101,6 +108,35 @@
   function hide() {
     if (!view) return;
     databases.updateView(dbId, view.id, { hidden: [...new Set([...(view.config.hidden ?? []), prop.id])] });
+    onclose();
+  }
+
+  // --------------------------------------------------------------- freeze
+
+  // A resize can land between the menu painting and the click. The table
+  // re-measures then; if the boundary no longer fits, keep the menu open and
+  // explain instead of saving a freeze it cannot show.
+  let freezeDenied = $state(false);
+  $effect(() => {
+    void freezeStatus;
+    freezeDenied = false;
+  });
+  const freezeBlocked = $derived(freezeDenied || (freezeStatus ? !freezeStatus.eligible : false));
+  const freezeReason = $derived(freezeBlocked ? freezeStatus?.reason || NO_ROOM : '');
+
+  function freezeHere() {
+    if (!view || freezeBlocked) return;
+    if (recheckFreeze && !recheckFreeze(prop.id)) {
+      freezeDenied = true;
+      return;
+    }
+    databases.updateView(dbId, view.id, { freezeThrough: prop.id });
+    onclose();
+  }
+
+  function unfreeze() {
+    if (!view) return;
+    databases.updateView(dbId, view.id, { freezeThrough: null });
     onclose();
   }
 
@@ -303,22 +339,45 @@
       aria-label="Description"
     />
 
-    {#if view && prop.type !== 'button'}
-      <div class="pop-sep"></div>
-      <button class="pop-item" onclick={() => sort('asc')}><Icon name="arrow-up" size={15} /><span class="grow">Sort ascending</span></button>
-      <button class="pop-item" onclick={() => sort('desc')}><Icon name="arrow-down" size={15} /><span class="grow">Sort descending</span></button>
-      {#if onfilter}
+    {#if view}
+      {#if prop.type !== 'button'}
+        <div class="pop-sep"></div>
+        <button class="pop-item" onclick={() => sort('asc')}><Icon name="arrow-up" size={15} /><span class="grow">Sort ascending</span></button>
+        <button class="pop-item" onclick={() => sort('desc')}><Icon name="arrow-down" size={15} /><span class="grow">Sort descending</span></button>
+        {#if onfilter}
+          <button
+            class="pop-item"
+            onclick={() => {
+              onfilter?.(prop);
+              onclose();
+            }}
+          >
+            <Icon name="filter" size={15} /><span class="grow">Filter</span>
+          </button>
+        {/if}
+        {#if !isTitle}<button class="pop-item" onclick={hide}><Icon name="eye-off" size={15} /><span class="grow">Hide in this view</span></button>{/if}
+      {/if}
+      {#if view.type === 'table'}
+        <div class="pop-sep"></div>
         <button
           class="pop-item"
-          onclick={() => {
-            onfilter?.(prop);
-            onclose();
-          }}
+          disabled={freezeBlocked}
+          title={freezeBlocked ? freezeReason : undefined}
+          aria-describedby={freezeBlocked ? 'freeze-no-room' : undefined}
+          onclick={freezeHere}
         >
-          <Icon name="filter" size={15} /><span class="grow">Filter</span>
+          <Icon name="pin" size={15} /><span class="grow">Freeze through this column</span>
+          {#if view.config.freezeThrough === prop.id}<Icon name="check" size={13} />{/if}
         </button>
+        {#if freezeBlocked}
+          <p class="note" id="freeze-no-room">{freezeReason}</p>
+        {/if}
+        {#if view.config.freezeThrough}
+          <button class="pop-item" onclick={unfreeze}>
+            <Icon name="pin-off" size={15} /><span class="grow">Unfreeze columns</span>
+          </button>
+        {/if}
       {/if}
-      {#if !isTitle}<button class="pop-item" onclick={hide}><Icon name="eye-off" size={15} /><span class="grow">Hide in this view</span></button>{/if}
     {/if}
     <div class="pop-sep"></div>
     <button class="pop-item" onclick={() => insert(-1)}><Icon name="arrow-left" size={15} /><span class="grow">Insert left</span></button>
