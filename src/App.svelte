@@ -9,7 +9,7 @@
   import { tabs } from './lib/tabs.svelte';
   import { api } from './lib/api';
   import { cssToRgb } from './lib/color-math';
-  import { sidebarSlide } from './lib/motion';
+  import { sidebarSlide, sidebarSlideOut } from './lib/motion';
   import { shortcuts, toAccelerator, type ShortcutId } from './lib/shortcuts.svelte';
   import { prefs } from './lib/prefs.svelte';
   import { store } from './lib/store.svelte';
@@ -185,6 +185,15 @@
   // Sharing a page (or stopping) reloads it: its editor works differently.
   const currentRoom = $derived(store.current?.sharedRoom ?? null);
 
+  // A table page fills the window (its rows scroll inside it). Other views
+  // and pages keep the page itself scrolling.
+  const tableView = $derived.by(() => {
+    const id = store.currentId;
+    if (store.view !== 'page' || currentKind !== 'database' || !id) return false;
+    const views = databases.views(id);
+    return (views.find((v) => v.id === prefs.dbViews[id]) ?? views[0])?.type === 'table';
+  });
+
   // Load the full page (with content) whenever the selection changes.
   $effect(() => {
     const id = store.currentId;
@@ -350,7 +359,11 @@
 
 <div class="app">
   {#if prefs.sidebarOpen}
-    <div class="sidebar-slot" in:sidebarSlide={{ duration: 280 }} out:sidebarSlide={{ duration: 220 }}>
+    <div
+      class="sidebar-slot"
+      in:sidebarSlide={{ duration: 280 }}
+      out:sidebarSlideOut={{ duration: 220 }}
+    >
       <Sidebar />
     </div>
   {/if}
@@ -359,7 +372,7 @@
     <div class="panes" class:split={showSplit || previewing} style:padding-right={makeRoom ? `${makeRoom}px` : null} bind:clientWidth={panesWidth}>
     <!-- Clicking or focusing a side marks it as the one in use (not an action). -->
     <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="scroller" class:active={showSplit && activePane === 'main'} class:targeted={split.preview === 'main'} onfocusin={() => (activePane = 'main')} onpointerdown={() => (activePane = 'main')} data-nav={store.navDirection} bind:this={scroller} use:paneSize onscroll={() => (scrolled = (scroller?.scrollTop ?? 0) > 2)}>
+    <div class="scroller" class:table-page={tableView} class:active={showSplit && activePane === 'main'} class:targeted={split.preview === 'main'} onfocusin={() => (activePane = 'main')} onpointerdown={() => (activePane = 'main')} data-nav={store.navDirection} bind:this={scroller} use:paneSize onscroll={() => (scrolled = (scroller?.scrollTop ?? 0) > 2)}>
       {#if store.view === 'home'}
         {#if planner.loaded && library.loaded}<HomeView />{/if}
       {:else if store.view === 'tag' && store.tag}
@@ -550,6 +563,14 @@
     overflow-y: auto;
     overflow-x: hidden;
     scrollbar-gutter: stable;
+  }
+  /* A table page is bounded by the window; the table scrolls its own rows. */
+  .scroller.table-page {
+    overflow: hidden;
+    scrollbar-gutter: auto;
+  }
+  .scroller.table-page > :global(.dbv) {
+    height: 100%;
   }
   /* Split view, after tiling window managers: each side is a rounded card
      on the sidebar's colour, the gap between them is the divider, and the

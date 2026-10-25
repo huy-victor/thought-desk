@@ -43,17 +43,38 @@ export function sheetOut(_node: Element, { duration = 180 } = {}) {
 }
 
 /**
- * The sidebar sliding in or out: its slot widens or narrows (so the page
- * beside it glides over), while the panel itself moves with the edge
- * instead of squashing, and fades a touch at the far end.
+ * The sidebar sliding in: the slot takes its resting width on the first
+ * frame, so the page beside it is resized exactly once instead of on every
+ * frame of the slide. Interpolating that width recalculates the style of
+ * every cell in a full table each frame, which is what made the motion
+ * stutter; the panel itself slides in on the compositor instead.
  */
-export function sidebarSlide(node: HTMLElement, { duration = 260 } = {}) {
+export function sidebarSlide(node: HTMLElement, { duration = 280 } = {}) {
   const width = node.offsetWidth;
   return {
     duration: reduced() ? 0 : duration,
     easing: cubicOut,
     css: (t: number, u: number) =>
-      `overflow: hidden; width: ${(t * width).toFixed(2)}px; --slide: ${(-u * width * 0.35).toFixed(2)}px; --slide-fade: ${(0.4 + 0.6 * t).toFixed(3)};`,
+      `position: relative; overflow: hidden; width: ${width}px;` +
+      ` background: var(--bg-sidebar); box-shadow: inset -1px 0 0 var(--separator);` +
+      ` --slide: ${(-u * width).toFixed(2)}px; --slide-fade: ${(0.55 + 0.45 * t).toFixed(3)};`,
+  };
+}
+
+/**
+ * The sidebar sliding out: the slot leaves the row on the first frame, so
+ * the page is already at its resting width while the panel slides away over
+ * it. Clipping stays off the slot so the page is revealed from the right as
+ * the panel moves left, instead of leaving an empty strip.
+ */
+export function sidebarSlideOut(node: HTMLElement, { duration = 220 } = {}) {
+  const width = node.offsetWidth;
+  return {
+    duration: reduced() ? 0 : duration,
+    easing: cubicOut,
+    css: (t: number, u: number) =>
+      `position: fixed; z-index: 3; left: 0; top: 0; height: 100%; width: ${width}px;` +
+      ` --slide: ${(-u * width).toFixed(2)}px; --slide-fade: ${t.toFixed(3)};`,
   };
 }
 

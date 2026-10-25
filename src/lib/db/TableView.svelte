@@ -32,12 +32,15 @@
     view,
     rows,
     groups,
+    fill = false,
     onfilter,
   }: {
     dbId: string;
     view: DbView;
     rows: DbRow[];
     groups: Group[] | null;
+    /** A full-page table fills its viewport instead of growing with its rows. */
+    fill?: boolean;
     onfilter?: (p: Property) => void;
   } = $props();
 
@@ -104,11 +107,254 @@
   const visible = $derived(flat.slice(0, lazy.limit));
   const indexOf = $derived(new Map(visible.map((r, i) => [r.id, i])));
 
+  // ------------------------------------------------- viewport row windowing
+  // A plain full-page table of fixed-height, unwrapped rows mounts only the
+  // rows on screen plus about one viewport of overscan. Exact-height spacers
+  // stand in for the rest, so the table's extent always covers every filtered
+  // row and nothing has to be restored after a sidebar motion. Wrapped,
+  // grouped, nested and embedded tables keep the legacy progressive path.
+  const WIN_MIN_ROWS = 60;
+  const WIN_PROVISIONAL_H = 35;
+  let rowH = $state(WIN_PROVISIONAL_H);
+  let winStart = $state(0);
+  let winEnd = $state(0);
+  let winFallback = $state(false);
+  /** The shape this windowing supports: a plain full-page table. */
+  const plain = $derived(fill && !shownGroups && !sub);
+  const windowed = $derived(plain && !c.wrap && flat.length >= WIN_MIN_ROWS && !winFallback);
+  /** When a nonuniform height is found, correctness wins: all rows, no spacers. */
+  const legacyRows = $derived(winFallback && plain ? flat : visible);
+  const fallbackIndexOf = $derived(winFallback && plain ? new Map(flat.map((r, i) => [r.id, i])) : null);
+
+  type WinItem = { kind: 'space'; key: string; height: number } | { kind: 'row'; key: string; row: DbRow; index: number };
+
+  /** Mounted rows outside the band that must keep their DOM (editor, drag). */
+  const protectedIndices = $derived.by(() => {
+    const out = new Set<number>();
+    const add = (id: string | null | undefined) => {
+      if (!id) return;
+      const i = flat.findIndex((r) => r.id === id);
+      if (i >= 0) out.add(i);
+    };
+    if (editing) add(editing.row.id);
+    add(dragRow);
+    add(dropRow?.id);
+    if (bulk) add(bulk.rows[0]?.id);
+    return out;
+  });
+
+  const winItems = $derived.by<WinItem[]>(() => {
+    if (!windowed) return [];
+    const n = flat.length;
+    const h = rowH > 0 ? rowH : WIN_PROVISIONAL_H;
+    // Before the first viewport read, draw a first screenful rather than a
+    // blank frame; the effect below replaces it with the measured window.
+    const start = winEnd === 0 && winStart === 0 ? 0 : Math.min(Math.max(0, winStart), n);
+    const end = winEnd === 0 && winStart === 0 ? Math.min(n, 60) : Math.max(start, Math.min(Math.max(0, winEnd), n));
+    const indices: number[] = [];
+    for (let i = start; i < end; i++) indices.push(i);
+    for (const i of protectedIndices) if (i >= 0 && i < n && (i < start || i >= end)) indices.push(i);
+    indices.sort((a, b) => a - b);
+    const items: WinItem[] = [];
+    let cursor = 0;
+    for (const i of indices) {
+      if (i < cursor) continue;
+      if (i > cursor) items.push({ kind: 'space', key: `space-${cursor}`, height: (i - cursor) * h });
+      items.push({ kind: 'row', key: flat[i].id, row: flat[i], index: i });
+      cursor = i + 1;
+    }
+    if (cursor < n) items.push({ kind: 'space', key: `space-${cursor}`, height: (n - cursor) * h });
+    return items;
+  });
+
+  function tableRowEls(): HTMLElement[] {    if (!grid) return [];
+    const out: HTMLElement[] = [];
+    for (const child of Array.from(grid.children)) {
+      if (child instanceof HTMLElement && child.classList.contains('tr')) out.push(child);
+    }
+    return out;
+  }
+
+  /** One window update from the real scrollport; no per-row layout reads. */
+  function updateWindow(force = false) {    if (!windowed || !body) return;
+    const n = flat.length;
+    const h = rowH > 0 ? rowH : WIN_PROVISIONAL_H;
+    const viewH = Math.max(1, body.clientHeight);
+    const top = Math.max(0, body.scrollTop);
+    const overscan = Math.ceil(viewH / h);
+    const start = Math.max(0, Math.min(n, Math.floor(top / h) - overscan));
+    const end = Math.max(start, Math.min(n, Math.ceil((top + viewH) / h) + overscan));
+    if (force || start !== winStart || end !== winEnd) {
+      winStart = start;
+      winEnd = end;
+    }
+  }
+
+  /** The rows' one scroll handler: moves the window, then the header strip. */
+  function syncFromBody() {
+    if (!body) return;
+    updateWindow();
+    if (headWrap && headWrap.scrollLeft !== body.scrollLeft) headWrap.scrollLeft = body.scrollLeft;
+  }
+
+  /**
+   * The height is measured, never assumed. Every mounted row is monitored by a   * single ResizeObserver, and the initial sample checks the rows on screen. A
+   * taller interior or newly mounted row, or a row that changes height later,
+   * drops the table back to all rows rather than squashing it.
+   */
+  let fallbackAnchor: { r: number; offset: number } | null = null;
+  let fallbackFrame = 0;
+  let rowRO: ResizeObserver | null = null;
+  let rowMeasured = false;
+  const observedRows = new Set<HTMLElement>();
+
+  function markFallback() {
+    if (winFallback) return;
+    if (body) {
+      const h = rowH > 0 ? rowH : WIN_PROVISIONAL_H;
+      const r = Math.floor(body.scrollTop / h);
+      fallbackAnchor = { r, offset: body.scrollTop - r * h };
+    }
+    winFallback = true;
+    rowRO?.disconnect();
+    observedRows.clear();
+  }
+
+  function measureRowHeight() {
+    if (!windowed || !grid || !body) return;
+    const els = tableRowEls();
+    if (!els.length) return;
+    // Measure a row the reader can actually see: the overscan rows under
+    // content-visibility:auto report the intrinsic size, not their layout.
+    const box = body.getBoundingClientRect();
+    const x = box.left + Math.min(Math.max(20, box.width / 2), Math.max(21, box.width - 20));
+    const y = box.top + Math.max(1, box.height) / 2;
+    const hit = document.elementFromPoint(x, y)?.closest('.tr') as HTMLElement | null;
+    const el = hit && grid.contains(hit) ? hit : els[0];
+    const h = el.getBoundingClientRect().height;
+    if (!h) return;
+    rowMeasured = true;
+    if (Math.abs(h - rowH) < 0.01) return;
+    const oldH = rowH > 0 ? rowH : WIN_PROVISIONAL_H;
+    const anchorRow = Math.floor(body.scrollTop / oldH);
+    const anchorOffset = body.scrollTop - anchorRow * oldH;
+    rowH = h;
+    updateWindow(true);
+    body.scrollTop = anchorRow * rowH + anchorOffset;
+  }
+
+  // Watch the mounted row shells: a row that appears taller than the measured
+  // pitch (newly mounted or resized later) must switch paths, once.
+  $effect(() => {
+    if (!windowed) {
+      rowRO?.disconnect();
+      observedRows.clear();
+      rowMeasured = false;
+      return;
+    }
+    void winItems;
+    if (!rowRO) {
+      rowRO = new ResizeObserver((entries) => {
+        if (!rowMeasured) return;
+        for (const e of entries) {
+          const el = e.target as HTMLElement;
+          const h = e.borderBoxSize?.[0]?.blockSize ?? el.getBoundingClientRect().height;
+          if (h <= 0 || Math.abs(h - (rowH > 0 ? rowH : WIN_PROVISIONAL_H)) <= 0.5) continue;
+          // Windowed rows are all laid out (content-visibility: visible), so an
+          // overscan row whose real height differs changes the extent too.
+          if (!fallbackFrame) {
+            fallbackFrame = requestAnimationFrame(() => {
+              fallbackFrame = 0;
+              markFallback();
+            });
+          }
+          break;
+        }
+      });
+    }
+    const els = tableRowEls();
+    for (const el of [...observedRows]) {
+      if (!el.isConnected) {
+        rowRO.unobserve(el);
+        observedRows.delete(el);
+      }
+    }
+    for (const el of els) {
+      if (!observedRows.has(el)) {
+        observedRows.add(el);
+        rowRO.observe(el);
+      }
+    }
+  });
+
+  // Restore the reader's row and pixel offset after switching to all rows.
+  $effect(() => {
+    if (!winFallback || !fallbackAnchor || !body) return;
+    const anchor = fallbackAnchor;
+    fallbackAnchor = null;
+    void tick().then(() => {
+      if (!body) return;
+      const cell = grid?.querySelector(`.td[data-r="${anchor.r}"][data-c="0"]`) as HTMLElement | null;
+      const row = cell?.closest('.tr') as HTMLElement | null;
+      if (!row) return;
+      const visibleTop = body.getBoundingClientRect().top;
+      // anchor.offset is the pixels consumed above the row (positive); the
+      // row's desired top in the viewport is the negative of it.
+      body.scrollTop += row.getBoundingClientRect().top - visibleTop + anchor.offset;
+    });
+  });
+
+  $effect(() => () => {
+    rowRO?.disconnect();
+    if (fallbackFrame) cancelAnimationFrame(fallbackFrame);
+  });
+
+  $effect(() => {
+    const onResize = () => {
+      if (!windowed) return;
+      updateWindow(true);
+      measureRowHeight();
+    };
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  });
+
+  /** Puts a logical row in the mounted window and in view before a lookup. */
+  function ensureMounted(r: number) {
+    if (!windowed || !body) return;
+    const h = rowH > 0 ? rowH : WIN_PROVISIONAL_H;
+    const viewH = Math.max(1, body.clientHeight);
+    const top = r * h;
+    const inView = top + h > body.scrollTop && top < body.scrollTop + viewH;
+    if (inView && r >= winStart && r < Math.max(winEnd, 1)) return;
+    const max = Math.max(0, body.scrollHeight - body.clientHeight);
+    body.scrollTop = Math.max(0, Math.min(max, top - viewH / 2));
+    updateWindow(true);
+  }
+
+  $effect(() => {
+    void windowed;
+    void flat.length;
+    void view.id;
+    void c.filters;
+    void c.sorts;
+    if (!windowed) return;
+    void tick().then(() => {
+      updateWindow(true);
+      measureRowHeight();
+    });
+  });
+
   $effect(() => {
     void view.id;
     void c.filters;
     void c.sorts;
+    void c.wrap;
     lazy.reset();
+    // A different view or shape is a fresh chance; a persistent nonuniform
+    // height will be detected again and fall back again.
+    winFallback = false;
+    rowMeasured = false;
   });
 
   // ------------------------------------------------------------ selection
@@ -119,7 +365,7 @@
   // Raw: a row kept here must stay the store's own object (a proxy of it would take edits).
   let editing = $state.raw<{ row: DbRow; prop: Property; el: Element; initial?: string } | null>(null);
   let grid: HTMLDivElement;
-  let body: HTMLDivElement;
+  let body = $state<HTMLDivElement>();
   let head: HTMLDivElement;
   // The header strip and the rows scroll sideways together (either can lead:
   // focusing a header button scrolls the strip).
@@ -136,18 +382,40 @@
     return grid?.querySelector(`[data-r="${p.r}"][data-c="${p.c}"]`) ?? null;
   }
 
+  /**
+   * Brings a cell into view without hiding it under the header, and without
+   * `scrollIntoView`'s habit of scrolling every ancestor: in a bounded table
+   * both the rows and the page would jump.
+   */
+  function reveal(el: HTMLElement) {
+    if (!body) return;
+    const b = body.getBoundingClientRect();
+    const r = el.getBoundingClientRect();
+    if (r.left < b.left) body.scrollLeft -= b.left - r.left;
+    else if (r.right > b.right) body.scrollLeft += r.right - b.right;
+    // The header is outside this scrollport in a full-page table, so the box
+    // of the rows is the whole visible band.
+    if (r.top < b.top) body.scrollTop -= b.top - r.top;
+    else if (r.bottom > b.bottom) body.scrollTop += r.bottom - b.bottom;
+  }
+
   async function select(p: Pos, extend = false) {
     // A jump (Ctrl+↓) goes at most 500 rows past what's drawn: drawing a
-    // 50,000-row table to its end would freeze the window.
-    const r = Math.max(0, Math.min(flat.length - 1, p.r, lazy.limit + 500));
+    // 50,000-row table to its end would freeze the window. A windowed table
+    // keeps every row addressable, so it can jump straight there.
+    const r = windowed
+      ? Math.max(0, Math.min(flat.length - 1, p.r))
+      : Math.max(0, Math.min(flat.length - 1, p.r, lazy.limit + 500));
     const col = Math.max(0, Math.min(columns.length - 1, p.c));
-    if (r >= lazy.limit) lazy.limit = r + 40;
+    if (!windowed && r >= lazy.limit) lazy.limit = r + 40;
+    if (windowed) ensureMounted(r);
     // Extending keeps the block's first corner where the selection was.
     if (!extend) anchor = null;
     else if (!anchor) anchor = sel;
     sel = { r, c: col };
     await tick();
-    cellEl(sel)?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    const el = cellEl(sel);
+    if (el) reveal(el);
   }
 
   function move(m: Move) {
@@ -162,11 +430,17 @@
     else if (m === 'up') void select({ r: sel.r - 1, c: sel.c });
   }
 
-  function startEdit(p: Pos, initial?: string) {
+  function startEdit(p: Pos, initial?: string, retry = true) {
     const row = flat[p.r];
     const prop = columns[p.c];
+    if (!row || !prop) return;
+    if (windowed) ensureMounted(p.r);
     const el = cellEl(p);
-    if (!row || !prop || !el) return;
+    if (!el) {
+      // A jump can render the window after this call; try once more when it has.
+      if (windowed && retry) void tick().then(() => startEdit(p, initial, false));
+      return;
+    }
     if (!EDITABLE.has(prop.type)) {
       if (prop.type === 'formula') ui.formula = { dbId, propId: prop.id };
       else if (prop.type === 'button' && initial === undefined) databases.press(row, prop);
@@ -539,7 +813,7 @@
    * the end of a long table.
    */
   async function newRow(group?: Group, template?: string, below = false) {
-    const last = visible.at(-1);
+    const last = windowed ? flat.at(-1) : visible.at(-1);
     const placed = manual && !groups && !sub;
     const where = below && placed && last ? { after: last.id } : placed && listRows[0] ? { before: listRows[0].id } : {};
     const made = await databases.addRow(dbId, { view, template, ...where, group: group && c.group ? { prop: c.group, key: group.key } : undefined });
@@ -574,8 +848,7 @@
   const groupedTypes = (['Basic', 'Thought Desk', 'Advanced', 'Automatic'] as const).map((g) => ({ g, items: TYPES.filter((t) => t.group === g && t.type !== 'title') }));
 </script>
 
-{#snippet rowEl(row: DbRow)}
-  {@const r = indexOf.get(row.id) ?? -1}
+{#snippet rowEl(row: DbRow, r: number)}
   <div
     class="tr"
     class:picked={picked.has(row.id)}
@@ -584,6 +857,7 @@
     class:dragging={dragRow === row.id}
     style:grid-template-columns={template}
     role="row"
+    aria-rowindex={r + 1}
     tabindex="-1"
     ondragover={(e) => onRowOver(e, row)}
     ondrop={onRowDrop}
@@ -665,7 +939,7 @@
   </div>
 {/snippet}
 
-<div class="table" class:wrap={c.wrap} style:--table-w="{total}px">
+<div class="table" class:wrap={c.wrap} class:fill class:windowed style:--table-w="{total}px" style:--row-h="{rowH}px">
   {#if picked.size}
     <div class="bulk">
       <span class="count">{picked.size} selected</span>
@@ -720,7 +994,7 @@
     </div>
   </div>
 
-  <div class="body" bind:this={body} onscroll={() => headWrap.scrollLeft !== body.scrollLeft && (headWrap.scrollLeft = body.scrollLeft)}>
+  <div class="body" bind:this={body} onscroll={syncFromBody}>
     <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
     <div
       class="grid"
@@ -728,6 +1002,7 @@
       role="grid"
       tabindex="0"
       aria-label="Rows"
+      aria-rowcount={flat.length}
       onkeydown={onKey}
       oncopy={(e) => onCopy(e)}
       oncut={(e) => onCopy(e, true)}
@@ -744,14 +1019,22 @@
               <button class="icon-btn g-add" onclick={() => newRow(g)} aria-label="New row in {g.label}" data-tip="New row here"><Icon name="plus" size={14} /></button>
             </div>
             {#if !collapsed.has(g.key)}
-              {#each g.rows.filter((r) => shownIds.has(r.id)) as row (row.id)}{@render rowEl(row)}{/each}
+              {#each g.rows.filter((r) => shownIds.has(r.id)) as row (row.id)}{@render rowEl(row, indexOf.get(row.id) ?? -1)}{/each}
             {/if}
           {/if}
         {/each}
+      {:else if windowed}
+        {#each winItems as item (item.key)}
+          {#if item.kind === 'space'}
+            <div class="win-space" style:height={`${item.height}px`} aria-hidden="true"></div>
+          {:else}
+            {@render rowEl(item.row, item.index)}
+          {/if}
+        {/each}
       {:else}
-        {#each visible as row (row.id)}{@render rowEl(row)}{/each}
+        {#each legacyRows as row (row.id)}{@render rowEl(row, (fallbackIndexOf?.get(row.id) ?? indexOf.get(row.id)) ?? -1)}{/each}
       {/if}
-      {#if visible.length < flat.length}<div class="more" {@attach lazy.more}></div>{/if}
+      {#if !windowed && !(winFallback && plain) && visible.length < flat.length}<div class="more" {@attach lazy.more}></div>{/if}
 
       {#if !flat.length}
         <div class="empty-row">
@@ -823,6 +1106,23 @@
     --edge-r: var(--edge, 0px);
     position: relative;
     font-size: var(--fs-body-ui);
+  }
+  /* A full-page table owns the viewport's height: its rows scroll inside it,
+     so the horizontal scrollbar stays at the bottom of the window. */
+  .table.fill {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
+  .fill .body {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    padding-bottom: 0;
+  }
+  .fill .body::-webkit-scrollbar-thumb {
+    background-color: color-mix(in srgb, var(--text-3) 45%, transparent);
   }
   :global(.embedded) .table {
     margin-left: -48px;
@@ -918,13 +1218,25 @@
   .grid {
     outline: none;
   }
+  /* Fixed-height stand-in for the logical rows outside the mounted window. */
+  .win-space {
+    width: var(--table-w);
+    pointer-events: none;
+  }
   .tr {
     position: relative;
     box-shadow: inset 0 -1px 0 var(--separator);
     /* Rows out of sight skip layout and painting: a table thousands of rows
-       long scrolls as lightly as a short one. */
+       long scrolls as lightly as a short one. Their stand-in height is the
+       pitch the rows were measured at, so the extent stays honest. */
     content-visibility: auto;
-    contain-intrinsic-block-size: auto 35px;
+    contain-intrinsic-block-size: auto var(--row-h, 35px);
+  }
+  /* Only a bounded band is mounted in a windowed table. Those rows are laid
+     out and painted for real, so the measured pitch and the spacers agree. */
+  .table.windowed .tr {
+    content-visibility: visible;
+    contain-intrinsic-block-size: none;
   }
   .tr:hover .gutter .handle,
   .tr:hover .pick,

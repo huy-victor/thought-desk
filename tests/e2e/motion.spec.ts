@@ -71,17 +71,30 @@ test('the sidebar slides closed and open, and still resizes', async ({ page }) =
   await open(page);
   const full = await page.evaluate(sidebarWidth);
   expect(full).toBeGreaterThan(150);
-  const between = (widths: number[]) => widths.filter((w) => w > 1 && w < full - 1);
+  // The page's width is settled on the first frame; the panel is what moves.
+  const state = () => {
+    const main = document.querySelector('main.main') as HTMLElement;
+    const sb = document.querySelector('.sidebar');
+    return {
+      x: Math.round(main.getBoundingClientRect().x),
+      slide: sb ? parseFloat(getComputedStyle(sb).getPropertyValue('--slide')) || 0 : 0,
+    };
+  };
 
-  await test.step('it narrows on its way out', async () => {
-    const widths = await frames(page, sidebarWidth, () => page.keyboard.press('Control+Backslash'));
-    expect(between(widths).length).toBeGreaterThan(0);
+  await test.step('the page rests while the panel slides out', async () => {
+    const seen = await frames(page, state, () => page.keyboard.press('Control+Backslash'));
+    // The edge only ever holds the two endpoints; it is never mid-width.
+    expect(seen.map((s) => s.x).filter((x) => x !== 0 && x !== Math.round(full))).toEqual([]);
+    expect(seen.at(-1)!.x).toBe(0);
+    expect(seen.some((s) => s.slide < -20)).toBe(true);
     await expect(page.locator('.sidebar-slot')).toHaveCount(0);
   });
 
-  await test.step('it widens on its way back, and comes to rest', async () => {
-    const widths = await frames(page, sidebarWidth, () => page.keyboard.press('Control+Backslash'));
-    expect(between(widths).length).toBeGreaterThan(0);
+  await test.step('the page rests while the panel slides back, and comes to rest', async () => {
+    const seen = await frames(page, state, () => page.keyboard.press('Control+Backslash'));
+    expect(seen.map((s) => s.x).filter((x) => x !== 0 && x !== Math.round(full))).toEqual([]);
+    expect(seen.at(-1)!.x).toBe(Math.round(full));
+    expect(seen.some((s) => s.slide < -20)).toBe(true);
     await expect.poll(() => page.evaluate(sidebarWidth)).toBe(full);
     await expect.poll(() => page.locator('.sidebar-slot').getAttribute('style')).toBeFalsy();
   });

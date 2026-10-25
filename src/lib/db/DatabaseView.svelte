@@ -267,6 +267,7 @@
   <section
     class="dbv"
     class:embedded
+    class:table-fill={!embedded && view.type === 'table'}
     class:dropping
     data-db={id}
     ondragover={onDragOver}
@@ -428,7 +429,7 @@
         {#if !ready && !databases.showsEarly(id, view, search)}
           <div class="reading">Loading rows…</div>
         {:else if view.type === 'table'}
-          <TableView bind:this={table} dbId={id} {view} rows={result.rows} groups={result.groups} onfilter={filterOn} />
+          <TableView bind:this={table} dbId={id} {view} rows={result.rows} groups={result.groups} fill={!embedded && view.type === 'table'} onfilter={filterOn} />
         {:else if view.type === 'board'}
           <BoardView dbId={id} {view} groups={result.groups} onsettings={openSettings} />
         {:else if view.type === 'gallery'}
@@ -495,6 +496,43 @@
   }
   .dbv:not(.embedded) {
     padding: 0 0 72px;
+  }
+  /* A full-page table is bounded by the window: its own rows scroll inside
+     the remaining height, under a header that stays put. */
+  .dbv.table-fill {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+    padding-bottom: 0;
+  }
+  /* A long title or description scrolls inside a bounded preamble, so the
+     rows, header and scrollbar always keep usable height. */
+  .dbv.table-fill .head {
+    flex: 0 1 auto;
+    min-height: 0;
+    max-height: 38%;
+    padding-top: 40px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  .dbv.table-fill .head.has-icon {
+    padding-top: 28px;
+  }
+  .dbv.table-fill .bar {
+    flex: none;
+  }
+  .dbv.table-fill .chips {
+    flex: none;
+    max-height: 56px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  .table-fill .view-body {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
   }
   .head {
     position: relative;
