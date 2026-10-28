@@ -246,6 +246,146 @@ test('rail move keeps column headers and cells aligned', async ({ page }) => {
   expect(Math.abs(th!.x - td!.x)).toBeLessThanOrEqual(1.5);
 });
 
+test('genuine header movement also updates the top rail', async ({ page }) => {
+  await open(page);
+  await seed(page);
+  await page.reload();
+  await page.locator('.sidebar').waitFor();
+  await page.waitForTimeout(300);
+
+  await page.locator('[role=tree][aria-label=Pages] .row', { hasText: 'Rail Host' }).first().click();
+  const table = page.locator('.database-block .table').first();
+  await expect(table.locator('.rail')).toBeVisible();
+
+  // Scroll header strip to 850
+  await table.evaluate((el) => {
+    const head = el.querySelector('.head-wrap') as HTMLElement;
+    head.scrollLeft = 850;
+    head.dispatchEvent(new Event('scroll'));
+  });
+
+  await expect.poll(async () => table.evaluate((el) => {
+    const body = el.querySelector('.body') as HTMLElement;
+    const head = el.querySelector('.head-wrap') as HTMLElement;
+    const rail = el.querySelector('.rail') as HTMLElement;
+    return { body: body.scrollLeft, head: head.scrollLeft, rail: rail.scrollLeft };
+  })).toEqual({ body: 850, head: 850, rail: 850 });
+});
+
+test('dynamic viewport resizing updates rail range and dimensions', async ({ page }) => {
+  await open(page);
+  await seed(page);
+  await page.reload();
+  await page.locator('.sidebar').waitFor();
+  await page.waitForTimeout(300);
+
+  await page.locator('[role=tree][aria-label=Pages] .row', { hasText: 'Rail Host' }).first().click();
+  const table = page.locator('.database-block .table').first();
+  await expect(table.locator('.rail')).toBeVisible();
+
+  // Initial measurements at 1280px viewport
+  const initClientW = await table.evaluate((el) => (el.querySelector('.rail') as HTMLElement).clientWidth);
+
+  // Narrow viewport to 700px
+  await page.setViewportSize({ width: 700, height: 800 });
+  await page.waitForTimeout(300);
+
+  const narrowDims = await table.evaluate((el) => {
+    const body = el.querySelector('.body') as HTMLElement;
+    const rail = el.querySelector('.rail') as HTMLElement;
+    return {
+      bodyClientW: body.clientWidth,
+      railClientW: rail.clientWidth,
+      diff: Math.abs(rail.clientWidth - body.clientWidth),
+    };
+  });
+  expect(narrowDims.railClientW).toBeLessThan(initClientW);
+  expect(narrowDims.diff).toBeLessThanOrEqual(1);
+
+  // Widen viewport to 1600px
+  await page.setViewportSize({ width: 1600, height: 800 });
+  await page.waitForTimeout(300);
+
+  const wideDims = await table.evaluate((el) => {
+    const body = el.querySelector('.body') as HTMLElement;
+    const rail = el.querySelector('.rail') as HTMLElement;
+    return {
+      bodyClientW: body.clientWidth,
+      railClientW: rail.clientWidth,
+      diff: Math.abs(rail.clientWidth - body.clientWidth),
+    };
+  });
+  expect(wideDims.railClientW).toBeGreaterThan(narrowDims.railClientW);
+  expect(wideDims.diff).toBeLessThanOrEqual(1);
+
+  // Restore standard viewport
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.waitForTimeout(200);
+});
+
+test('column hide/show switches rail visibility, and remounted rail preserves existing body scroll', async ({ page }) => {
+  await open(page);
+  const info = await seed(page);
+  await page.reload();
+  await page.locator('.sidebar').waitFor();
+  await page.waitForTimeout(300);
+
+  await page.locator('[role=tree][aria-label=Pages] .row', { hasText: 'Rail Host' }).first().click();
+  const table = page.locator('.database-block .table').first();
+  await expect(table.locator('.rail')).toBeVisible();
+
+  // Scroll body to 400
+  await table.evaluate((el) => {
+    const body = el.querySelector('.body') as HTMLElement;
+    body.scrollLeft = 400;
+    body.dispatchEvent(new Event('scroll'));
+  });
+  await page.waitForTimeout(100);
+
+  const beforeHide = await table.evaluate((el) => {
+    const body = el.querySelector('.body') as HTMLElement;
+    const rail = el.querySelector('.rail') as HTMLElement;
+    return { body: body.scrollLeft, rail: rail.scrollLeft };
+  });
+  expect(beforeHide.body).toBe(400);
+  expect(beforeHide.rail).toBe(400);
+
+  // Hide 23 of the 24 columns via store so table fits in view (no overflow)
+  await page.evaluate(async ({ wideId }) => {
+    const databases = (window as any).databases;
+    const hidden = Array.from({ length: 23 }, (_, i) => `p${String(i).padStart(2, '0')}`);
+    databases.updateView(wideId, 'table', { hidden });
+  }, { wideId: info.wideId });
+
+  // Rail should hide because table no longer overflows
+  await expect(table.locator('.rail')).toHaveCount(0);
+
+  // Body scroll should not have been corrupted to negative or invalid
+  const midScroll = await table.evaluate((el) => (el.querySelector('.body') as HTMLElement).scrollLeft);
+  expect(midScroll).toBeGreaterThanOrEqual(0);
+
+  // Restore columns so table overflows again
+  await page.evaluate(async ({ wideId }) => {
+    const databases = (window as any).databases;
+    databases.updateView(wideId, 'table', { hidden: [] });
+  }, { wideId: info.wideId });
+
+  // Rail remounts and is visible
+  await expect(table.locator('.rail')).toBeVisible();
+
+  // Verify rail initializes to current body scroll position and doesn't reset body
+  const afterUnhide = await table.evaluate((el) => {
+    const body = el.querySelector('.body') as HTMLElement;
+    const rail = el.querySelector('.rail') as HTMLElement;
+    return {
+      bodyLeft: body.scrollLeft,
+      railLeft: rail.scrollLeft,
+      diff: Math.abs(rail.scrollLeft - body.scrollLeft),
+    };
+  });
+  expect(afterUnhide.diff).toBeLessThanOrEqual(1);
+});
+
 test('multiple independent embedded instances do not control each other', async ({ page }) => {
   await open(page);
   await seed(page);
@@ -277,7 +417,7 @@ test('multiple independent embedded instances do not control each other', async 
   const t2State = await table2.evaluate((el) => {
     const body = el.querySelector('.body') as HTMLElement;
     const rail = el.querySelector('.rail') as HTMLElement;
-    return { body: body.scrollLeft, rail: rail.railScrollLeft ?? rail.scrollLeft };
+    return { body: body.scrollLeft, rail: rail.scrollLeft };
   });
 
   expect(t1State.body).toBe(450);
