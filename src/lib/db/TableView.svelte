@@ -193,6 +193,37 @@
   // The header strip and the rows scroll sideways together (either can lead:
   // focusing a header button scrolls the strip).
   let headWrap: HTMLDivElement;
+  // Positions this component just mirrored into the header/body. Their scroll
+  // events arrive later; matching those positions is our own echo, not a new
+  // gesture, and must not be written back.
+  let programmaticHead: number | null = null;
+  let programmaticBody: number | null = null;
+
+  function syncHeadScroll() {
+    if (!headWrap || !body) return;
+    const left = headWrap.scrollLeft;
+    if (programmaticHead !== null && Math.abs(left - programmaticHead) < 1) {
+      return;
+    }
+    programmaticHead = null;
+    if (Math.abs(body.scrollLeft - left) >= 1) {
+      body.scrollLeft = left;
+      programmaticBody = body.scrollLeft;
+    }
+  }
+
+  function syncBodyScroll() {
+    if (!headWrap || !body) return;
+    const left = body.scrollLeft;
+    if (programmaticBody !== null && Math.abs(left - programmaticBody) < 1) {
+      return;
+    }
+    programmaticBody = null;
+    if (Math.abs(headWrap.scrollLeft - left) >= 1) {
+      headWrap.scrollLeft = left;
+      programmaticHead = headWrap.scrollLeft;
+    }
+  }
 
   const range = $derived.by(() => {
     if (!sel) return null;
@@ -790,7 +821,7 @@
     </div>
   {/if}
 
-  <div class="head-wrap" bind:this={headWrap} onscroll={() => body && body.scrollLeft !== headWrap.scrollLeft && (body.scrollLeft = headWrap.scrollLeft)}>
+  <div class="head-wrap" bind:this={headWrap} onscroll={syncHeadScroll}>
     <div class="head-inner">
     <div class="head" bind:this={head} role="row" style:grid-template-columns={template}>
       <div class="gutter" class:pinned={pinned.pinned.length > 0} style:left="0px">
@@ -850,7 +881,7 @@
     </div>
   {/if}
 
-  <div class="body" bind:this={body} onscroll={() => headWrap.scrollLeft !== body.scrollLeft && (headWrap.scrollLeft = body.scrollLeft)}>
+  <div class="body" bind:this={body} onscroll={syncBodyScroll}>
     <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
     <div
       class="grid"
