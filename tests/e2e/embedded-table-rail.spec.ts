@@ -246,7 +246,7 @@ test('rail move keeps column headers and cells aligned', async ({ page }) => {
   expect(Math.abs(th!.x - td!.x)).toBeLessThanOrEqual(1.5);
 });
 
-test('genuine header movement also updates the top rail', async ({ page }) => {
+test('genuine header movement also updates the top rail, and newer body movement takes precedence', async ({ page }) => {
   await open(page);
   await seed(page);
   await page.reload();
@@ -257,7 +257,7 @@ test('genuine header movement also updates the top rail', async ({ page }) => {
   const table = page.locator('.database-block .table').first();
   await expect(table.locator('.rail')).toBeVisible();
 
-  // Scroll header strip to 850
+  // 1. Scroll header strip to 850
   await table.evaluate((el) => {
     const head = el.querySelector('.head-wrap') as HTMLElement;
     head.scrollLeft = 850;
@@ -270,6 +270,42 @@ test('genuine header movement also updates the top rail', async ({ page }) => {
     const rail = el.querySelector('.rail') as HTMLElement;
     return { body: body.scrollLeft, head: head.scrollLeft, rail: rail.scrollLeft };
   })).toEqual({ body: 850, head: 850, rail: 850 });
+
+  // 2. Newer body movement during pending header-led event:
+  const afterNewBodyFromHead = await table.evaluate((el) => {
+    const body = el.querySelector('.body') as HTMLElement;
+    const head = el.querySelector('.head-wrap') as HTMLElement;
+    const rail = el.querySelector('.rail') as HTMLElement;
+    head.scrollLeft = 1200;
+    head.dispatchEvent(new Event('scroll'));
+    body.scrollLeft = 600;
+    body.dispatchEvent(new Event('scroll'));
+    return { body: body.scrollLeft, head: head.scrollLeft, rail: rail.scrollLeft };
+  });
+  expect(afterNewBodyFromHead).toEqual({ body: 600, head: 600, rail: 600 });
+  await expect.poll(async () => table.evaluate((el) => ({
+    body: (el.querySelector('.body') as HTMLElement).scrollLeft,
+    head: (el.querySelector('.head-wrap') as HTMLElement).scrollLeft,
+    rail: (el.querySelector('.rail') as HTMLElement).scrollLeft,
+  }))).toEqual({ body: 600, head: 600, rail: 600 });
+
+  // 3. Newer body movement during pending rail-led event:
+  const afterNewBodyFromRail = await table.evaluate((el) => {
+    const body = el.querySelector('.body') as HTMLElement;
+    const head = el.querySelector('.head-wrap') as HTMLElement;
+    const rail = el.querySelector('.rail') as HTMLElement;
+    rail.scrollLeft = 1100;
+    rail.dispatchEvent(new Event('scroll'));
+    body.scrollLeft = 500;
+    body.dispatchEvent(new Event('scroll'));
+    return { body: body.scrollLeft, head: head.scrollLeft, rail: rail.scrollLeft };
+  });
+  expect(afterNewBodyFromRail).toEqual({ body: 500, head: 500, rail: 500 });
+  await expect.poll(async () => table.evaluate((el) => ({
+    body: (el.querySelector('.body') as HTMLElement).scrollLeft,
+    head: (el.querySelector('.head-wrap') as HTMLElement).scrollLeft,
+    rail: (el.querySelector('.rail') as HTMLElement).scrollLeft,
+  }))).toEqual({ body: 500, head: 500, rail: 500 });
 });
 
 test('dynamic viewport resizing updates rail range and dimensions', async ({ page }) => {
