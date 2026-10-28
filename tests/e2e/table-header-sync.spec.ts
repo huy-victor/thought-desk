@@ -1,7 +1,7 @@
 // tests/e2e/table-header-sync.spec.ts
 // Verifies horizontal scroll synchronization between the header strip (.head-wrap)
 // and the table body (.body) in both full-page and embedded layouts.
-import type { Page, Locator } from '@playwright/test';
+import type { Page } from '@playwright/test';
 import { test, expect, open } from './fixtures';
 
 test.use({ viewport: { width: 1280, height: 800 } });
@@ -225,7 +225,7 @@ test('genuine header scroll leads the body sideways', async ({ page }) => {
   expect(Math.abs(th!.x - td!.x)).toBeLessThanOrEqual(1.5);
 });
 
-test('focusing an offscreen column header button reveals it and leads the body', async ({ page }) => {
+test('focusing offscreen header control reveals it and leads the body', async ({ page }) => {
   await openSyncProbe(page);
   const table = page.locator('.table').first();
 
@@ -233,12 +233,22 @@ test('focusing an offscreen column header button reveals it and leads the body',
   const initialLeft = await table.evaluate((el) => (el.querySelector('.body') as HTMLElement).scrollLeft);
   expect(initialLeft).toBe(0);
 
-  // Focus a distant column header (e.g. Field 15)
-  const targetTh = table.locator('.th[data-prop="p14"]');
-  await targetTh.scrollIntoViewIfNeeded();
+  // The column header row has tabindex="-1" on individual column cells, while the
+  // trailing Add Property button (.th.add) is a focusable button positioned at the
+  // far right of the header strip past all 30 columns.
+  const addButton = table.locator('.th.add');
+  await addButton.focus();
 
-  await page.waitForTimeout(150);
+  // Verify document.activeElement is indeed the focused button
+  const isButtonActive = await page.evaluate(() => {
+    const el = document.activeElement;
+    return el?.tagName === 'BUTTON' && el.classList.contains('add');
+  });
+  expect(isButtonActive).toBe(true);
 
+  await page.waitForTimeout(200);
+
+  // Focus-driven reveal scrolled headWrap, and syncHeadScroll led the body
   const finalState = await table.evaluate((el) => {
     const headWrap = el.querySelector('.head-wrap') as HTMLElement;
     const body = el.querySelector('.body') as HTMLElement;
@@ -249,15 +259,14 @@ test('focusing an offscreen column header button reveals it and leads the body',
     };
   });
 
-  expect(finalState.bodyLeft).toBeGreaterThan(0);
+  expect(finalState.headLeft).toBeGreaterThan(1000);
+  expect(finalState.bodyLeft).toBeGreaterThan(1000);
   expect(finalState.diff).toBeLessThanOrEqual(1);
 
-  // Ensure header and cells are aligned
-  const th = await targetTh.boundingBox();
-  const td = await table.locator('.td[data-r="0"][data-c="15"]').boundingBox();
-  expect(th).not.toBeNull();
-  expect(td).not.toBeNull();
-  expect(Math.abs(th!.x - td!.x)).toBeLessThanOrEqual(1.5);
+  // Bounding box assertion: button is in the visible viewport
+  const btnBox = await addButton.boundingBox();
+  expect(btnBox).not.toBeNull();
+  expect(btnBox!.x + btnBox!.width).toBeGreaterThan(0);
 });
 
 test('two simultaneous embedded copies do not control each other', async ({ page }) => {
@@ -382,14 +391,14 @@ test('frozen columns stay pinned while scrolled body and header align', async ({
   expect(Math.abs(titleThBox!.x - gutterRight)).toBeLessThanOrEqual(2.5);
   expect(Math.abs(titleTdBox!.x - gutterRight)).toBeLessThanOrEqual(2.5);
 
-  // Unfrozen column: check alignment of a visible column (e.g. Field 10 or 11)
+  // Unfrozen column: non-optional check of alignment of a visible column
   const colIndex = 11;
   const colId = `p${String(colIndex - 1).padStart(2, '0')}`;
   const thBox = await table.locator(`.th[data-prop="${colId}"]`).boundingBox();
   const tdBox = await table.locator(`.td[data-r="0"][data-c="${colIndex}"]`).boundingBox();
-  if (thBox && tdBox) {
-    expect(Math.abs(thBox.x - tdBox.x)).toBeLessThanOrEqual(1.5);
-  }
+  expect(thBox).not.toBeNull();
+  expect(tdBox).not.toBeNull();
+  expect(Math.abs(thBox!.x - tdBox!.x)).toBeLessThanOrEqual(1.5);
 });
 
 test('split pane: table maintains header alignment', async ({ page }) => {
@@ -428,20 +437,91 @@ test('split pane: table maintains header alignment', async ({ page }) => {
   });
   expect(mainState).toBeLessThanOrEqual(1);
 
-  // Also verify embedded table in side pane
+  // Non-optional verification: side embedded table must be present and aligned
   const sideTable = page.locator('.side .database-block .table').first();
-  if (await sideTable.count() > 0) {
-    await sideTable.evaluate((el) => {
-      const body = el.querySelector('.body') as HTMLElement;
-      body.scrollLeft = 450;
-      body.dispatchEvent(new Event('scroll'));
-    });
-    await page.waitForTimeout(100);
-    const sideDiff = await sideTable.evaluate((el) => {
-      const headWrap = el.querySelector('.head-wrap') as HTMLElement;
-      const body = el.querySelector('.body') as HTMLElement;
-      return Math.abs(headWrap.scrollLeft - body.scrollLeft);
-    });
-    expect(sideDiff).toBeLessThanOrEqual(1);
-  }
+  await expect(sideTable).toBeVisible();
+
+  await sideTable.evaluate((el) => {
+    const body = el.querySelector('.body') as HTMLElement;
+    body.scrollLeft = 450;
+    body.dispatchEvent(new Event('scroll'));
+  });
+  await page.waitForTimeout(100);
+  const sideDiff = await sideTable.evaluate((el) => {
+    const headWrap = el.querySelector('.head-wrap') as HTMLElement;
+    const body = el.querySelector('.body') as HTMLElement;
+    return Math.abs(headWrap.scrollLeft - body.scrollLeft);
+  });
+  expect(sideDiff).toBeLessThanOrEqual(1);
+});
+
+test('viewport resizing maintains header and rows alignment across narrow and wide layouts', async ({ page }) => {
+  await openSyncProbe(page);
+  const table = page.locator('.table').first();
+
+  // Scroll body to 600
+  await table.evaluate((el) => {
+    const body = el.querySelector('.body') as HTMLElement;
+    body.scrollLeft = 600;
+    body.dispatchEvent(new Event('scroll'));
+  });
+  await page.waitForTimeout(100);
+
+  // Resize viewport to 650px narrow
+  await page.setViewportSize({ width: 650, height: 800 });
+  await page.waitForTimeout(200);
+
+  const narrowDiff = await table.evaluate((el) => {
+    const headWrap = el.querySelector('.head-wrap') as HTMLElement;
+    const body = el.querySelector('.body') as HTMLElement;
+    return Math.abs(headWrap.scrollLeft - body.scrollLeft);
+  });
+  expect(narrowDiff).toBeLessThanOrEqual(1);
+
+  // Widen viewport to 1500px wide
+  await page.setViewportSize({ width: 1500, height: 800 });
+  await page.waitForTimeout(200);
+
+  const wideDiff = await table.evaluate((el) => {
+    const headWrap = el.querySelector('.head-wrap') as HTMLElement;
+    const body = el.querySelector('.body') as HTMLElement;
+    return Math.abs(headWrap.scrollLeft - body.scrollLeft);
+  });
+  expect(wideDiff).toBeLessThanOrEqual(1);
+
+  // Restore standard viewport
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.waitForTimeout(150);
+});
+
+test('view switching preserves header and rows alignment', async ({ page }) => {
+  await openSyncProbe(page);
+  const table = page.locator('.table').first();
+
+  // Scroll body to 750
+  await table.evaluate((el) => {
+    const body = el.querySelector('.body') as HTMLElement;
+    body.scrollLeft = 750;
+    body.dispatchEvent(new Event('scroll'));
+  });
+  await page.waitForTimeout(100);
+
+  // Switch to another page in the sidebar
+  await page.locator('[role=tree][aria-label=Pages] .row', { hasText: 'Sync host' }).first().click();
+  await expect(page.locator('.database-block .table').first()).toBeVisible();
+  await page.waitForTimeout(200);
+
+  // Switch back to Sync probe
+  await page.locator('.sidebar .db-row .nav-main', { hasText: 'Sync probe' }).first().click();
+  await expect(page.locator('.table .grid')).toBeVisible();
+  await page.waitForTimeout(200);
+
+  // Assert header and body are aligned after view return
+  const probeTable = page.locator('.table').first();
+  const diff = await probeTable.evaluate((el) => {
+    const headWrap = el.querySelector('.head-wrap') as HTMLElement;
+    const body = el.querySelector('.body') as HTMLElement;
+    return Math.abs(headWrap.scrollLeft - body.scrollLeft);
+  });
+  expect(diff).toBeLessThanOrEqual(1);
 });
