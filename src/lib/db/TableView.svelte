@@ -37,12 +37,14 @@
     rows,
     groups,
     onfilter,
+    embedded = false,
   }: {
     dbId: string;
     view: DbView;
     rows: DbRow[];
     groups: Group[] | null;
     onfilter?: (p: Property) => void;
+    embedded?: boolean;
   } = $props();
 
   const WIDTH: Partial<Record<PropertyType, number>> = {
@@ -84,8 +86,15 @@
   const pinnedSet = $derived(new Set(pinned.pinned));
   const lastPinned = $derived(pinned.pinned.at(-1) ?? null);
 
+  let contentW = $state(0);
+  let railVisible = $state(false);
+
   function measure() {
-    if (body) viewportW = body.clientWidth;
+    if (!body) return;
+    viewportW = body.clientWidth;
+    contentW = body.scrollWidth;
+    const more = embedded && body.scrollWidth > body.clientWidth + 1;
+    if (more !== railVisible) railVisible = more;
   }
 
   /** The same geometry the strip uses, asked for one candidate boundary. */
@@ -193,6 +202,44 @@
   // The header strip and the rows scroll sideways together (either can lead:
   // focusing a header button scrolls the strip).
   let headWrap: HTMLDivElement;
+  let rail = $state<HTMLDivElement>();
+  let railMirror: number | null = null;
+
+  $effect(() => {
+    if (rail && body) {
+      if (Math.abs(rail.scrollLeft - body.scrollLeft) >= 1) {
+        rail.scrollLeft = body.scrollLeft;
+        railMirror = rail.scrollLeft;
+      }
+    }
+  });
+
+  function syncFromRail() {
+    if (!body || !rail) return;
+    const left = rail.scrollLeft;
+    if (railMirror !== null && Math.abs(left - railMirror) < 1) {
+      return;
+    }
+    railMirror = null;
+    if (Math.abs(body.scrollLeft - left) >= 1) {
+      body.scrollLeft = left;
+    }
+    if (headWrap && Math.abs(headWrap.scrollLeft - left) >= 1) {
+      headWrap.scrollLeft = left;
+    }
+  }
+
+  function onBodyScroll() {
+    if (!body) return;
+    const left = body.scrollLeft;
+    if (headWrap && headWrap.scrollLeft !== left) {
+      headWrap.scrollLeft = left;
+    }
+    if (rail && Math.abs(rail.scrollLeft - left) >= 1) {
+      railMirror = left;
+      rail.scrollLeft = left;
+    }
+  }
 
   const range = $derived.by(() => {
     if (!sel) return null;
@@ -790,6 +837,13 @@
     </div>
   {/if}
 
+  {#if railVisible}
+    <!-- A wide embedded table keeps a scrollbar within reach at its top. -->
+    <div class="rail" bind:this={rail} onscroll={syncFromRail} aria-hidden="true">
+      <div class="rail-space" style:width="{contentW}px"></div>
+    </div>
+  {/if}
+
   <div class="head-wrap" bind:this={headWrap} onscroll={() => body && body.scrollLeft !== headWrap.scrollLeft && (body.scrollLeft = headWrap.scrollLeft)}>
     <div class="head-inner">
     <div class="head" bind:this={head} role="row" style:grid-template-columns={template}>
@@ -850,7 +904,7 @@
     </div>
   {/if}
 
-  <div class="body" bind:this={body} onscroll={() => headWrap.scrollLeft !== body.scrollLeft && (headWrap.scrollLeft = body.scrollLeft)}>
+  <div class="body" bind:this={body} onscroll={onBodyScroll}>
     <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
     <div
       class="grid"
@@ -991,6 +1045,28 @@
     width: max-content;
     min-width: 100%;
     padding: 0 var(--edge-r) 0 var(--edge-l);
+  }
+  .rail {
+    flex: none;
+    overflow-x: auto;
+    overflow-y: hidden;
+    height: 12px;
+  }
+  .rail::-webkit-scrollbar {
+    height: 10px;
+  }
+  .rail::-webkit-scrollbar-thumb {
+    min-width: 40px;
+    border: 3px solid transparent;
+    background-color: color-mix(in srgb, var(--text-3) 45%, transparent);
+    background-clip: content-box;
+    border-radius: 999px;
+  }
+  .rail:hover::-webkit-scrollbar-thumb {
+    background-color: var(--text-3);
+  }
+  .rail-space {
+    height: 1px;
   }
   /* The header sticks to the top while the page scrolls, and follows the
      body sideways (it's a separate strip, scrolled in step). */

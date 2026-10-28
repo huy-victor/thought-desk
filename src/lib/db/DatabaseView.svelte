@@ -437,7 +437,7 @@
         {#if !ready && !databases.showsEarly(id, view, search)}
           <div class="reading">{t('dbTable.loadingRows')}</div>
         {:else if view.type === 'table'}
-          <TableView bind:this={table} dbId={id} {view} rows={result.rows} groups={result.groups} onfilter={filterOn} />
+          <TableView bind:this={table} dbId={id} {view} rows={result.rows} groups={result.groups} onfilter={filterOn} {embedded} />
         {:else if view.type === 'board'}
           <BoardView dbId={id} {view} groups={result.groups} onsettings={openSettings} />
         {:else if view.type === 'gallery'}
