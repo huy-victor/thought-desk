@@ -284,7 +284,20 @@ test('dynamic viewport resizing updates rail range and dimensions', async ({ pag
   await expect(table.locator('.rail')).toBeVisible();
 
   // Initial measurements at 1280px viewport
-  const initClientW = await table.evaluate((el) => (el.querySelector('.rail') as HTMLElement).clientWidth);
+  const initDims = await table.evaluate((el) => {
+    const body = el.querySelector('.body') as HTMLElement;
+    const rail = el.querySelector('.rail') as HTMLElement;
+    return {
+      bodyScrollW: body.scrollWidth,
+      bodyClientW: body.clientWidth,
+      railScrollW: rail.scrollWidth,
+      railClientW: rail.clientWidth,
+      maxDiff: Math.abs((rail.scrollWidth - rail.clientWidth) - (body.scrollWidth - body.clientWidth)),
+    };
+  });
+  expect(Math.abs(initDims.railScrollW - initDims.bodyScrollW)).toBeLessThanOrEqual(1);
+  expect(Math.abs(initDims.railClientW - initDims.bodyClientW)).toBeLessThanOrEqual(1);
+  expect(initDims.maxDiff).toBeLessThanOrEqual(1);
 
   // Narrow viewport to 700px
   await page.setViewportSize({ width: 700, height: 800 });
@@ -294,13 +307,17 @@ test('dynamic viewport resizing updates rail range and dimensions', async ({ pag
     const body = el.querySelector('.body') as HTMLElement;
     const rail = el.querySelector('.rail') as HTMLElement;
     return {
+      bodyScrollW: body.scrollWidth,
       bodyClientW: body.clientWidth,
+      railScrollW: rail.scrollWidth,
       railClientW: rail.clientWidth,
-      diff: Math.abs(rail.clientWidth - body.clientWidth),
+      maxDiff: Math.abs((rail.scrollWidth - rail.clientWidth) - (body.scrollWidth - body.clientWidth)),
     };
   });
-  expect(narrowDims.railClientW).toBeLessThan(initClientW);
-  expect(narrowDims.diff).toBeLessThanOrEqual(1);
+  expect(narrowDims.railClientW).toBeLessThan(initDims.railClientW);
+  expect(Math.abs(narrowDims.railScrollW - narrowDims.bodyScrollW)).toBeLessThanOrEqual(1);
+  expect(Math.abs(narrowDims.railClientW - narrowDims.bodyClientW)).toBeLessThanOrEqual(1);
+  expect(narrowDims.maxDiff).toBeLessThanOrEqual(1);
 
   // Widen viewport to 1600px
   await page.setViewportSize({ width: 1600, height: 800 });
@@ -310,20 +327,24 @@ test('dynamic viewport resizing updates rail range and dimensions', async ({ pag
     const body = el.querySelector('.body') as HTMLElement;
     const rail = el.querySelector('.rail') as HTMLElement;
     return {
+      bodyScrollW: body.scrollWidth,
       bodyClientW: body.clientWidth,
+      railScrollW: rail.scrollWidth,
       railClientW: rail.clientWidth,
-      diff: Math.abs(rail.clientWidth - body.clientWidth),
+      maxDiff: Math.abs((rail.scrollWidth - rail.clientWidth) - (body.scrollWidth - body.clientWidth)),
     };
   });
   expect(wideDims.railClientW).toBeGreaterThan(narrowDims.railClientW);
-  expect(wideDims.diff).toBeLessThanOrEqual(1);
+  expect(Math.abs(wideDims.railScrollW - wideDims.bodyScrollW)).toBeLessThanOrEqual(1);
+  expect(Math.abs(wideDims.railClientW - wideDims.bodyClientW)).toBeLessThanOrEqual(1);
+  expect(wideDims.maxDiff).toBeLessThanOrEqual(1);
 
   // Restore standard viewport
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.waitForTimeout(200);
 });
 
-test('column hide/show switches rail visibility, and remounted rail preserves existing body scroll', async ({ page }) => {
+test('column hide/show switches rail visibility, and remounted rail matches clamped body scroll', async ({ page }) => {
   await open(page);
   const info = await seed(page);
   await page.reload();
@@ -360,9 +381,9 @@ test('column hide/show switches rail visibility, and remounted rail preserves ex
   // Rail should hide because table no longer overflows
   await expect(table.locator('.rail')).toHaveCount(0);
 
-  // Body scroll should not have been corrupted to negative or invalid
-  const midScroll = await table.evaluate((el) => (el.querySelector('.body') as HTMLElement).scrollLeft);
-  expect(midScroll).toBeGreaterThanOrEqual(0);
+  // When content no longer overflows, browser legitimately clamps body.scrollLeft
+  const clampedBodyScroll = await table.evaluate((el) => (el.querySelector('.body') as HTMLElement).scrollLeft);
+  expect(clampedBodyScroll).toBe(0);
 
   // Restore columns so table overflows again
   await page.evaluate(async ({ wideId }) => {
@@ -373,7 +394,7 @@ test('column hide/show switches rail visibility, and remounted rail preserves ex
   // Rail remounts and is visible
   await expect(table.locator('.rail')).toBeVisible();
 
-  // Verify rail initializes to current body scroll position and doesn't reset body
+  // Verify rail initializes to match the actual post-clamp body position
   const afterUnhide = await table.evaluate((el) => {
     const body = el.querySelector('.body') as HTMLElement;
     const rail = el.querySelector('.rail') as HTMLElement;
@@ -383,6 +404,7 @@ test('column hide/show switches rail visibility, and remounted rail preserves ex
       diff: Math.abs(rail.scrollLeft - body.scrollLeft),
     };
   });
+  expect(afterUnhide.bodyLeft).toBe(clampedBodyScroll);
   expect(afterUnhide.diff).toBeLessThanOrEqual(1);
 });
 
