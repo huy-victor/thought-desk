@@ -202,43 +202,68 @@
   // The header strip and the rows scroll sideways together (either can lead:
   // focusing a header button scrolls the strip).
   let headWrap: HTMLDivElement;
+  // Positions this component just mirrored into the header, body or rail. Their
+  // scroll events arrive later; matching those positions is our own echo, not a
+  // new gesture, and must not be written back.
+  let programmaticHead: number | null = null;
+  let programmaticBody: number | null = null;
+  let programmaticRail: number | null = null;
   let rail = $state<HTMLDivElement>();
-  let railMirror: number | null = null;
 
+  /** A rail that mounts late (wider content, restored columns) starts where the rows already are. */
   $effect(() => {
-    if (rail && body) {
-      if (Math.abs(rail.scrollLeft - body.scrollLeft) >= 1) {
-        rail.scrollLeft = body.scrollLeft;
-        railMirror = rail.scrollLeft;
-      }
-    }
+    if (rail && body) mirrorRail(body.scrollLeft);
   });
 
-  function syncFromRail() {
-    if (!body || !rail) return;
+  function mirrorRail(left: number) {
+    if (!rail || Math.abs(rail.scrollLeft - left) < 1) return;
+    rail.scrollLeft = left;
+    programmaticRail = rail.scrollLeft;
+  }
+
+  function syncRailScroll() {
+    if (!rail || !body) return;
     const left = rail.scrollLeft;
-    if (railMirror !== null && Math.abs(left - railMirror) < 1) {
+    if (programmaticRail !== null && Math.abs(left - programmaticRail) < 1) {
       return;
     }
-    railMirror = null;
+    programmaticRail = null;
     if (Math.abs(body.scrollLeft - left) >= 1) {
       body.scrollLeft = left;
+      programmaticBody = body.scrollLeft;
     }
     if (headWrap && Math.abs(headWrap.scrollLeft - left) >= 1) {
       headWrap.scrollLeft = left;
+      programmaticHead = headWrap.scrollLeft;
     }
   }
 
-  function onBodyScroll() {
-    if (!body) return;
+  function syncHeadScroll() {
+    if (!headWrap || !body) return;
+    const left = headWrap.scrollLeft;
+    if (programmaticHead !== null && Math.abs(left - programmaticHead) < 1) {
+      return;
+    }
+    programmaticHead = null;
+    if (Math.abs(body.scrollLeft - left) >= 1) {
+      body.scrollLeft = left;
+      programmaticBody = body.scrollLeft;
+    }
+    mirrorRail(left);
+  }
+
+  function syncBodyScroll() {
+    if (!headWrap || !body) return;
     const left = body.scrollLeft;
-    if (headWrap && headWrap.scrollLeft !== left) {
+    if (programmaticBody !== null && Math.abs(left - programmaticBody) < 1) {
+      return;
+    }
+    programmaticBody = null;
+    if (Math.abs(headWrap.scrollLeft - left) >= 1) {
       headWrap.scrollLeft = left;
+      programmaticHead = headWrap.scrollLeft;
     }
-    if (rail && Math.abs(rail.scrollLeft - left) >= 1) {
-      railMirror = left;
-      rail.scrollLeft = left;
-    }
+    mirrorRail(left);
   }
 
   const range = $derived.by(() => {
@@ -838,13 +863,14 @@
   {/if}
 
   {#if railVisible}
-    <!-- A wide embedded table keeps a scrollbar within reach at its top. -->
-    <div class="rail" bind:this={rail} onscroll={syncFromRail} aria-hidden="true">
+    <!-- A wide embedded table keeps a scrollbar within reach at its top. It is
+         aria-hidden, so it must never take keyboard focus either. -->
+    <div class="rail" bind:this={rail} onscroll={syncRailScroll} aria-hidden="true" tabindex="-1">
       <div class="rail-space" style:width="{contentW}px"></div>
     </div>
   {/if}
 
-  <div class="head-wrap" bind:this={headWrap} onscroll={() => body && body.scrollLeft !== headWrap.scrollLeft && (body.scrollLeft = headWrap.scrollLeft)}>
+  <div class="head-wrap" bind:this={headWrap} onscroll={syncHeadScroll}>
     <div class="head-inner">
     <div class="head" bind:this={head} role="row" style:grid-template-columns={template}>
       <div class="gutter" class:pinned={pinned.pinned.length > 0} style:left="0px">
@@ -904,7 +930,7 @@
     </div>
   {/if}
 
-  <div class="body" bind:this={body} onscroll={onBodyScroll}>
+  <div class="body" bind:this={body} onscroll={syncBodyScroll}>
     <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
     <div
       class="grid"
